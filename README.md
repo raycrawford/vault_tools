@@ -111,6 +111,36 @@ The four read tools are always available. All paths in tool output are relative 
 
 Guardrails: only `.md` files inside the vault; nothing in hidden folders (`.git`, `.obsidian`, `.trash`) or in `00 - Templates` and `Attachments`; no delete tool. A change is searchable immediately, because the index refreshes right after a write. Claude Desktop and Claude Code still ask for approval on tool calls unless you've auto-approved them. Keeping the vault in git lets you review writes with `git diff` and undo them with `git restore`. Edits made while Obsidian has the same note open, or while OneDrive is syncing it, can conflict.
 
+## Enriching notes with Unisys directory info
+
+The vault server can't see the Unisys directory. To augment notes (for example `People/` or `Clients/` files) with directory details such as title, organization, manager, location and email, tell Claude to open a Chrome session and ask **Microsoft 365 Copilot Chat** there. Copilot is signed in to your Unisys account and can look people up in the directory. Claude then reads the answer back and updates the note.
+
+This needs Claude's Chrome integration (Claude in Chrome, or Claude Code with Chrome enabled) and a Chrome profile signed in to your Unisys Microsoft 365 account. To have Claude write the result into a note, the vault's server must be registered with `--writable` (see [Enabling writes](#enabling-writes)). Otherwise Claude can only show you the text to paste.
+
+### Example prompt
+
+```text
+Use the vault-work tools to read People/Kayleigh Gillis.md and note which of
+these are missing: job title, organization, manager, office location, email.
+
+Then open a Chrome session, go to Microsoft 365 Copilot Chat (signed in as me),
+and ask:
+
+  "Look up Kayleigh Gillis in the Unisys directory. Give me her job title,
+   department/organization, manager, office location and work email. If more
+   than one person matches, list them with their titles so I can pick."
+
+If Copilot returns several matches, stop and ask me which one. Otherwise,
+copy only what Copilot reports. Don't guess missing fields.
+
+Then use vault-work's edit_note (or append_to_note) to add the missing fields
+to the note, under a "Directory" heading, with today's date and the source
+"Unisys directory via Copilot". Don't change anything else in the note, and show
+me what you changed.
+```
+
+Tips: check anything important against the directory yourself, since Copilot can return the wrong person or stale data. For many people at once, give Claude a list and ask it to work through them one at a time, pausing on ambiguous matches.
+
 ## Troubleshooting
 
 | Symptom | Cause and fix |
