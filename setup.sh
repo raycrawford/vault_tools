@@ -1,31 +1,44 @@
 #!/usr/bin/env bash
-# Vault MCP server setup: run once per machine (macOS or Linux), and again any
-# time the server stops connecting. Safe to re-run.
+# Vault MCP server setup: run once per vault per machine (macOS or Linux), and
+# again any time a server stops connecting. Safe to re-run.
 #
-#   bash .tools/setup.sh
+#   bash setup.sh <name> <vault path>
+#   bash setup.sh work     ~/repos/notes-unisys
+#   bash setup.sh personal ~/repos/notes-personal
 #
-# 1. Creates a Python virtualenv OUTSIDE the vault (~/.local/share/vault-mcp)
-#    and installs the `mcp` package into it.
-# 2. Builds this machine's search index (~/.cache/vault-mcp/).
+# 1. Creates ONE shared Python virtualenv (~/.local/share/vault-mcp/venv) and
+#    installs 'mcp<2' into it.
+# 2. Builds this vault's search index (~/.cache/vault-mcp/).
 # 3. Starts the server once and checks it answers an MCP handshake.
-# 4. Registers it as "vault" with Claude Code (user scope) and Claude Desktop.
-#    Claude Desktop must be fully quit (Cmd-Q) and reopened afterwards.
+# 4. Registers it as "vault-<name>" with Claude Code (user scope) and Claude
+#    Desktop, replacing only that entry. Claude Desktop must be fully quit
+#    (Cmd-Q) and reopened afterwards.
 
 set -euo pipefail
 
-TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SERVER="$TOOLS_DIR/vault-mcp-server.py"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SERVER="$HERE/vault-mcp-server.py"
 VENV="${VAULT_MCP_VENV:-$HOME/.local/share/vault-mcp/venv}"
 PY="$VENV/bin/python"
 
 step() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 fail() { printf '\033[31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
+[ $# -eq 2 ] || fail "usage: bash setup.sh <name> <vault path>
+       e.g. bash setup.sh work ~/repos/notes-unisys"
+NAME="$1"
+case "$NAME" in
+  ''|*[!A-Za-z0-9_-]*) fail "name must contain only letters, digits, '-' and '_' (got '$NAME')" ;;
+esac
+[ -d "$2" ] || fail "not a directory: $2"
+VAULT="$(cd "$2" && pwd)"
+ENTRY="vault-$NAME"
+
 # ── 1. Python environment ─────────────────────────────────────────────────────
 
 find_python() {
   # mcp needs Python 3.10+. macOS's /usr/bin/python3 is 3.9, so look for others.
-  for c in python3.13 python3.12 python3.11 python3.10 \
+  for c in python3.14 python3.13 python3.12 python3.11 python3.10 \
            /opt/homebrew/bin/python3 /usr/local/bin/python3 python3; do
     p="$(command -v "$c" 2>/dev/null)" || continue
     if "$p" -c 'import sys; sys.exit(sys.version_info < (3, 10))' 2>/dev/null; then
@@ -38,34 +51,39 @@ find_python() {
 step "Python environment: $VENV"
 if [ -x "$PY" ] && "$PY" -c 'from mcp.server.fastmcp import FastMCP' 2>/dev/null; then
   echo "Already set up ($("$PY" --version))."
-elif BASE_PY="$(find_python)"; then
-  echo "Using $BASE_PY ($("$BASE_PY" --version))"
-  mkdir -p "$(dirname "$VENV")"
-  "$BASE_PY" -m venv "$VENV"
-  "$PY" -m pip install --quiet --upgrade pip
-  "$PY" -m pip install --quiet 'mcp<2'
-elif command -v uv >/dev/null 2>&1; then
-  echo "No Python 3.10+ found; using uv to provide one."
-  uv venv --quiet --python 3.12 "$VENV"
-  uv pip install --quiet --python "$PY" 'mcp<2'
 else
-  fail "Need Python 3.10 or newer. Install one with 'brew install python@3.12'
+  [ -e "$VENV" ] && echo "Existing venv is broken or has mcp 2.x; rebuilding it."
+  if BASE_PY="$(find_python)"; then
+    echo "Using $BASE_PY ($("$BASE_PY" --version))"
+    mkdir -p "$(dirname "$VENV")"
+    "$BASE_PY" -m venv --clear "$VENV"
+    "$PY" -m pip install --quiet --upgrade pip
+    "$PY" -m pip install --quiet 'mcp<2'
+  elif command -v uv >/dev/null 2>&1; then
+    echo "No Python 3.10+ found; using uv to provide one."
+    mkdir -p "$(dirname "$VENV")"
+    uv venv --quiet --clear --python 3.12 "$VENV"
+    uv pip install --quiet --python "$PY" 'mcp<2'
+  else
+    fail "Need Python 3.10 or newer. Install one with 'brew install python@3.12'
        (or install uv: https://docs.astral.sh/uv/), then re-run this script."
+  fi
 fi
 "$PY" -c 'from mcp.server.fastmcp import FastMCP' || fail "the mcp package did not install (proxy/VPN blocking pip?)"
 
 # ── 2. Index ──────────────────────────────────────────────────────────────────
 
-step "Building search index"
-"$PY" "$TOOLS_DIR/vault_index.py"
+step "Building search index for $NAME"
+"$PY" "$HERE/vault_index.py" --vault "$VAULT"
 
 # ── 3. Handshake test ─────────────────────────────────────────────────────────
 
 step "Testing the server"
-"$PY" - "$PY" "$SERVER" <<'EOF'
+"$PY" - "$PY" "$SERVER" "$VAULT" "$NAME" <<'EOF'
 import json, subprocess, sys
-py, server = sys.argv[1], sys.argv[2]
-proc = subprocess.Popen([py, server], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+py, server, vault, name = sys.argv[1:5]
+proc = subprocess.Popen([py, server, "--vault", vault, "--name", name],
+                        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE, text=True)
 msgs = [
     {"jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -86,45 +104,52 @@ for line in out.splitlines():
         replies[msg.get("id")] = msg
     except ValueError:
         pass
-if 2 not in replies:
+if 2 not in replies or "result" not in replies[2]:
     print("Server did not answer. Its output was:\n" + (err or out or "(nothing)"))
     sys.exit(1)
+print("Server name: " + replies[1]["result"]["serverInfo"]["name"])
 print(replies[2]["result"]["content"][0]["text"])
+print("\nHandshake OK.")
 EOF
 
 # ── 4. Register with Claude ───────────────────────────────────────────────────
 
-step "Registering with Claude Code"
+step "Registering $ENTRY with Claude Code"
 if command -v claude >/dev/null 2>&1; then
-  claude mcp remove vault --scope user >/dev/null 2>&1 || true
-  claude mcp add vault --scope user -- "$PY" "$SERVER"
+  claude mcp remove "$ENTRY" --scope user >/dev/null 2>&1 || true
+  claude mcp add "$ENTRY" --scope user -- "$PY" "$SERVER" --vault "$VAULT" --name "$NAME"
 else
-  echo "Claude Code not found on PATH; skipped."
+  echo "The 'claude' CLI is not on PATH, so Claude Code was NOT registered."
+  echo "Install it, then re-run this script, or register by hand:"
+  echo "  claude mcp add $ENTRY --scope user -- \"$PY\" \"$SERVER\" --vault \"$VAULT\" --name \"$NAME\""
 fi
 
-step "Registering with Claude Desktop"
+step "Registering $ENTRY with Claude Desktop"
 case "$(uname)" in
   Darwin) DESKTOP_CONFIG="$HOME/Library/Application Support/Claude/claude_desktop_config.json" ;;
   *)      DESKTOP_CONFIG="$HOME/.config/Claude/claude_desktop_config.json" ;;
 esac
 if [ -d "$(dirname "$DESKTOP_CONFIG")" ]; then
-  "$PY" - "$DESKTOP_CONFIG" "$PY" "$SERVER" <<'EOF'
+  "$PY" - "$DESKTOP_CONFIG" "$ENTRY" "$PY" "$SERVER" "$VAULT" "$NAME" <<'EOF'
 import json, shutil, sys
 from pathlib import Path
-config_path, py, server = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+config_path, entry, py, server, vault, name = Path(sys.argv[1]), *sys.argv[2:7]
 config = {}
 if config_path.exists():
     shutil.copy(config_path, config_path.with_suffix(".json.bak"))
     config = json.loads(config_path.read_text() or "{}")
 servers = config.setdefault("mcpServers", {})
-servers["vault"] = {"command": py, "args": [server]}
+servers[entry] = {"command": py, "args": [server, "--vault", vault, "--name", name]}
 config_path.write_text(json.dumps(config, indent=2) + "\n")
-print(f"Wrote 'vault' to {config_path} (backup: .json.bak)")
-others = [n for n in servers if n != "vault"]
+print(f"Wrote '{entry}' to {config_path} (backup: .json.bak)")
+others = [n for n in servers if n != entry]
 if others:
     print("Other MCP servers in that file: " + ", ".join(others))
-    print("  If any of these are old copies of this server (e.g. 'vault-search'),")
-    print("  delete them from the file: they will keep failing to connect.")
+stale = [n for n in ("vault", "vault-search") if n in servers]
+if stale:
+    print("WARNING: stale entries from earlier attempts: " + ", ".join(stale))
+    print("  They are not touched. If they are old copies of this server they will keep")
+    print("  failing or pointing at old code; remove them from the file yourself.")
 EOF
   echo "Now fully quit Claude Desktop (Cmd-Q) and reopen it."
 else
@@ -132,4 +157,4 @@ else
 fi
 
 step "Done"
-echo "Try asking Claude: \"vault stats\" or \"search my vault for <client name>\""
+echo "Try asking Claude: \"vault stats\" or \"search my $NAME vault for <topic>\""
