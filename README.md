@@ -1,6 +1,6 @@
 # vault-tools
 
-A small, read-only [MCP](https://modelcontextprotocol.io) server that lets Claude Desktop and Claude Code search and read Obsidian vaults. One copy of the code serves any number of vaults. Each vault gets its own registration (`vault-work`, `vault-personal`, ...) and its own search index.
+A small [MCP](https://modelcontextprotocol.io) server that lets Claude Desktop and Claude Code search and read Obsidian vaults. It is read-only by default, with opt-in writing per vault. One copy of the code serves any number of vaults. Each vault gets its own registration (`vault-work`, `vault-personal`, ...) and its own search index.
 
 The notes can be confidential, so this is a local stdio server. Nothing leaves the machine, and by default the server never writes to a vault. Writing is an opt-in, per-vault setting (see [Enabling writes](#enabling-writes)).
 
@@ -22,7 +22,7 @@ bash setup.sh personal ~/repos/notes-personal
 bash setup.sh work ~/Library/CloudStorage/OneDrive-Unisys/repos/notes-unisys
 ```
 
-`setup.sh <name> <vault path>` registers a server called `vault-<name>`. It:
+`setup.sh <name> <vault path> [--writable]` registers a server called `vault-<name>`, read-only unless you add `--writable`. It:
 
 1. Creates one shared virtualenv at `~/.local/share/vault-mcp/venv` (`VAULT_MCP_VENV` overrides it) and installs `'mcp<2'`. A venv that can't `from mcp.server.fastmcp import FastMCP` is treated as broken and rebuilt.
 2. Builds the vault's search index.
@@ -64,10 +64,10 @@ That creates `vault-research` with its own index. Nothing else needs to change.
 ```bash
 VENV=~/.local/share/vault-mcp/venv/bin/python
 $VENV vault_index.py --vault ~/repos/notes-unisys [--rebuild]
-$VENV vault-mcp-server.py --vault ~/repos/notes-unisys --name work
+$VENV vault-mcp-server.py --vault ~/repos/notes-unisys --name work [--writable]
 ```
 
-The vault comes from `--vault PATH` or the `VAULT_ROOT` environment variable, and the label from `--name` or `VAULT_NAME`. The server exits with a clear message if the vault is missing or isn't a directory.
+The vault comes from `--vault PATH` or the `VAULT_ROOT` environment variable, the label from `--name` or `VAULT_NAME`, and write mode from `--writable` or `VAULT_WRITABLE=1`. The server exits with a clear message if the vault is missing or isn't a directory.
 
 ## How it works
 
@@ -91,7 +91,7 @@ The vault comes from `--vault PATH` or the `VAULT_ROOT` environment variable, an
 
 ## Tools
 
-All paths in tool output are relative to the vault root.
+The four read tools are always available. All paths in tool output are relative to the vault root.
 
 | Tool | Arguments | Behavior |
 |---|---|---|
