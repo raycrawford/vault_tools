@@ -9,10 +9,10 @@ are re-read, so a refresh of the whole vault takes well under a second. The MCP
 server refreshes the index itself before answering, so running this by hand is
 only needed to force a full rebuild or to check what gets indexed:
 
-    python3 .tools/vault_index.py            # incremental refresh
-    python3 .tools/vault_index.py --rebuild  # drop and rebuild from scratch
+    python3 vault_index.py --vault PATH            # incremental refresh
+    python3 vault_index.py --vault PATH --rebuild  # drop and rebuild from scratch
 
-The vault root is the parent of this .tools folder (override with VAULT_ROOT).
+The vault root comes from --vault PATH or the VAULT_ROOT environment variable.
 The index lives OUTSIDE the vault, in ~/.cache/vault-mcp/, so it never syncs
 through git or OneDrive; each machine keeps its own (override with VAULT_INDEX).
 """
@@ -24,13 +24,29 @@ import hashlib
 import os
 import re
 import sqlite3
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-VAULT_ROOT = Path(os.environ.get("VAULT_ROOT") or Path(__file__).resolve().parent.parent).resolve()
+def resolve_vault_root(argv: list[str] | None = None) -> Path:
+    """Vault root from --vault, else $VAULT_ROOT. Exits with a clear message if it
+    is missing or isn't a directory."""
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--vault")
+    args, _ = pre.parse_known_args(sys.argv[1:] if argv is None else argv)
+    raw = args.vault or os.environ.get("VAULT_ROOT")
+    if not raw:
+        sys.exit("vault: no vault given. Pass --vault PATH or set VAULT_ROOT.")
+    root = Path(raw).expanduser()
+    if not root.is_dir():
+        sys.exit(f"vault: not a directory: {root}")
+    return root.resolve()
+
+
+VAULT_ROOT = resolve_vault_root()
 
 
 def default_index_path() -> Path:
@@ -253,6 +269,7 @@ def refresh(rebuild: bool = False) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--vault", help="vault root (or set VAULT_ROOT)")
     parser.add_argument("--rebuild", action="store_true", help="drop and rebuild the index")
     args = parser.parse_args()
 

@@ -10,11 +10,12 @@ Tools:
   list_notes    browse notes by folder, name, tag and date, newest first
   vault_stats   note counts per top-level folder and index status
 
-The vault root is the parent of this .tools folder, so the same file works on
-every machine. The search index (see vault_index.py) is refreshed
-automatically, so there is nothing to run by hand.
+One server instance serves one vault, given by --vault PATH (or VAULT_ROOT).
+--name NAME (or VAULT_NAME) labels it, e.g. "work", so Claude can tell the
+servers apart when several are enabled. The search index (see vault_index.py)
+is refreshed automatically, so there is nothing to run by hand.
 
-Setup (once per machine):  bash .tools/setup.sh
+Setup (once per vault per machine):  bash setup.sh <name> <vault path>
 """
 
 from __future__ import annotations
