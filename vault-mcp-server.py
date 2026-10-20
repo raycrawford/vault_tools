@@ -20,6 +20,8 @@ Setup (once per vault per machine):  bash setup.sh <name> <vault path>
 
 from __future__ import annotations
 
+import argparse
+import os
 import re
 import sqlite3
 import sys
@@ -35,7 +37,32 @@ VAULT_ROOT      = vi.VAULT_ROOT
 REFRESH_SECONDS = 60          # re-scan the vault at most once a minute
 MAX_NOTE_CHARS  = 100_000
 
-mcp = FastMCP("vault")
+
+def resolve_name() -> str:
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--name")
+    args, _ = pre.parse_known_args(sys.argv[1:])
+    raw = args.name or os.environ.get("VAULT_NAME") or VAULT_ROOT.name
+    return re.sub(r"[^A-Za-z0-9_-]+", "-", raw).strip("-") or "vault"
+
+
+NAME  = resolve_name()
+LABEL = f"the {NAME.upper()} vault ({VAULT_ROOT.name})"
+
+mcp = FastMCP(
+    f"vault-{NAME}",
+    instructions=f"Read-only search of {LABEL}. Use these tools only for questions "
+                 f"about that vault's notes; other vault-* servers cover other vaults.",
+)
+
+
+def vault_tool(summary: str):
+    """Register a tool, prefixing its description with which vault it serves."""
+    def register(fn):
+        fn.__doc__ = f"{summary.format(label=LABEL)}\n{fn.__doc__}"
+        return mcp.tool()(fn)
+    return register
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -140,7 +167,7 @@ def scan_search(query: str, folder: str, limit: int) -> list[dict]:
 
 # ── MCP tools ─────────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@vault_tool("Search {label}.")
 def search_vault(query: str, folder: str = "", since: str = "", limit: int = 20) -> str:
     """
     Full-text search of the Obsidian vault (meeting notes, journal, pursuits,
@@ -197,7 +224,7 @@ def search_vault(query: str, folder: str = "", since: str = "", limit: int = 20)
     return "\n".join(out)
 
 
-@mcp.tool()
+@vault_tool("Read a note from {label}.")
 def read_note(path: str) -> str:
     """
     Read the full Markdown of a vault note, including frontmatter.
@@ -226,7 +253,7 @@ def read_note(path: str) -> str:
     return f"# {found.relative_to(VAULT_ROOT).as_posix()}\n\n{text}"
 
 
-@mcp.tool()
+@vault_tool("List notes in {label}.")
 def list_notes(folder: str = "", name: str = "", tag: str = "", since: str = "",
                limit: int = 50) -> str:
     """
@@ -271,14 +298,14 @@ def list_notes(folder: str = "", name: str = "", tag: str = "", since: str = "",
     return "\n".join(out)
 
 
-@mcp.tool()
+@vault_tool("Statistics for {label}.")
 def vault_stats() -> str:
     """
     Summary of the vault: notes, words and date range per top-level folder,
     plus where the index lives and when it was last refreshed.
     """
     ok = ensure_index()
-    lines = [f"Vault: {VAULT_ROOT}", f"Index: {vi.INDEX_PATH}"]
+    lines = [f"Vault: {NAME.upper()} ({VAULT_ROOT})", f"Index: {vi.INDEX_PATH}"]
     if not ok:
         return "\n".join(lines + ["Index unavailable: " + "; ".join(_last_result.get("errors", []))])
 
