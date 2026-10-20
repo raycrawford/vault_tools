@@ -2,7 +2,7 @@
 
 A small, read-only [MCP](https://modelcontextprotocol.io) server that lets Claude Desktop and Claude Code search and read Obsidian vaults. One copy of the code serves any number of vaults. Each vault gets its own registration (`vault-work`, `vault-personal`, ...) and its own search index.
 
-The notes can be confidential, so this is a local stdio server. Nothing leaves the machine, and the server never writes to a vault.
+The notes can be confidential, so this is a local stdio server. Nothing leaves the machine, and by default the server never writes to a vault. Writing is an opt-in, per-vault setting (see [Enabling writes](#enabling-writes)).
 
 ## Prerequisites
 
@@ -39,6 +39,17 @@ Check that it worked:
 ```bash
 claude mcp list        # vault-work and vault-personal should show ✔ Connected
 ```
+
+### Enabling writes
+
+Vaults are read-only unless you ask otherwise. Add `--writable` to the setup command for each vault that should accept writes:
+
+```bash
+bash setup.sh personal ~/repos/notes-personal --writable   # read-write
+bash setup.sh work     ~/repos/notes-unisys                # stays read-only
+```
+
+Then Cmd-Q and reopen Claude Desktop. Re-run the command without `--writable` to turn writing off again. `vault_stats` shows `Mode: read-only` or `Mode: read-write`. Without the flag, the write tools aren't registered at all, so a read-only vault can't be changed by this server.
 
 ### Adding a third vault
 
@@ -89,6 +100,17 @@ All paths in tool output are relative to the vault root.
 | `list_notes` | `folder`, `name`, `tag`, `since`, `limit=50` | Notes newest first, with date, word count, status and tags. All filters combine. |
 | `vault_stats` | none | Notes, words and date range per folder, the index location, the last refresh time, and any read errors (with a hint about macOS privacy settings). |
 
+### Write tools (only with `--writable`)
+
+| Tool | Arguments | Behavior |
+|---|---|---|
+| `create_note` | `path`, `content` | Creates a new note, adding `.md` and any missing folders. Fails if the note exists, so it never overwrites. |
+| `append_to_note` | `path`, `content` | Adds text to the end of an existing note, inserting a newline first if needed. |
+| `edit_note` | `path`, `old_text`, `new_text` | Replaces one exact passage. Fails if `old_text` is missing or appears more than once, so a note that changed since Claude read it isn't overwritten blindly. The file is replaced atomically. |
+| `move_note` | `path`, `new_path` | Moves or renames a note. Fails if the destination exists. Links in other notes are not updated. |
+
+Guardrails: only `.md` files inside the vault; nothing in hidden folders (`.git`, `.obsidian`, `.trash`) or in `00 - Templates` and `Attachments`; no delete tool. A change is searchable immediately, because the index refreshes right after a write. Claude Desktop and Claude Code still ask for approval on tool calls unless you've auto-approved them. Keeping the vault in git lets you review writes with `git diff` and undo them with `git restore`. Edits made while Obsidian has the same note open, or while OneDrive is syncing it, can conflict.
+
 ## Troubleshooting
 
 | Symptom | Cause and fix |
@@ -105,5 +127,6 @@ All paths in tool output are relative to the vault root.
 
 ## Ideas not yet built
 
-- Backlinks and outgoing links (`[[wikilinks]]`) as tools.
+- Backlinks and outgoing links (`[[wikilinks]]`) as tools, and updating links on `move_note`.
+- A delete tool that moves notes to `.trash/`.
 - Filtering on frontmatter fields beyond `status`.
