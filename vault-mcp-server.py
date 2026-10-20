@@ -2,7 +2,8 @@
 """
 Obsidian Vault MCP Server
 =========================
-Read-only access to this vault for Claude Desktop and Claude Code.
+Access to this vault for Claude Desktop and Claude Code. Read-only unless the
+server is started with --writable (or VAULT_WRITABLE=1).
 
 Tools:
   search_vault  ranked full-text search (SQLite FTS5, stemmed)
@@ -10,9 +11,16 @@ Tools:
   list_notes    browse notes by folder, name, tag and date, newest first
   vault_stats   note counts per top-level folder and index status
 
+Only with --writable:
+  create_note      new note; refuses to overwrite
+  append_to_note   add text to the end of a note
+  edit_note        replace one exact passage in a note
+  move_note        move or rename a note; refuses to overwrite
+
 One server instance serves one vault, given by --vault PATH (or VAULT_ROOT).
 --name NAME (or VAULT_NAME) labels it, e.g. "work", so Claude can tell the
-servers apart when several are enabled. The search index (see vault_index.py)
+servers apart when several are enabled. Writes are off unless --writable is
+given, in which case the write tools are not even registered. The search index (see vault_index.py)
 is refreshed automatically, so there is nothing to run by hand.
 
 Setup (once per vault per machine):  bash setup.sh <name> <vault path>
@@ -23,6 +31,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shutil
 import sqlite3
 import sys
 import time
@@ -46,13 +55,21 @@ def resolve_name() -> str:
     return re.sub(r"[^A-Za-z0-9_-]+", "-", raw).strip("-") or "vault"
 
 
-NAME  = resolve_name()
+def resolve_writable() -> bool:
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--writable", action="store_true")
+    args, _ = pre.parse_known_args(sys.argv[1:])
+    return args.writable or os.environ.get("VAULT_WRITABLE", "").lower() in ("1", "true", "yes")
+
+
+NAME     = resolve_name()
+WRITABLE = resolve_writable()
 LABEL = f"the {NAME.upper()} vault ({VAULT_ROOT.name})"
 
 mcp = FastMCP(
     f"vault-{NAME}",
-    instructions=f"Read-only search of {LABEL}. Use these tools only for questions "
-                 f"about that vault's notes; other vault-* servers cover other vaults.",
+    instructions=f"{'Read-write' if WRITABLE else 'Read-only'} access to {LABEL}. Use these tools "
+                 f"only for that vault's notes; other vault-* servers cover other vaults.",
 )
 
 
@@ -305,7 +322,8 @@ def vault_stats() -> str:
     plus where the index lives and when it was last refreshed.
     """
     ok = ensure_index()
-    lines = [f"Vault: {NAME.upper()} ({VAULT_ROOT})", f"Index: {vi.INDEX_PATH}"]
+    lines = [f"Vault: {NAME.upper()} ({VAULT_ROOT})", f"Index: {vi.INDEX_PATH}",
+             f"Mode: {'read-write' if WRITABLE else 'read-only'}"]
     if not ok:
         return "\n".join(lines + ["Index unavailable: " + "; ".join(_last_result.get("errors", []))])
 
@@ -331,6 +349,153 @@ def vault_stats() -> str:
             lines.append("  (macOS privacy: allow Claude under System Settings → "
                          "Privacy & Security → Files and Folders / Full Disk Access.)")
     return "\n".join(lines)
+
+# ── Write tools (only registered with --writable) ─────────────────────────────
+
+def write_target(path: str, must_exist: bool) -> Path | str:
+    """Validate a path for writing. Returns the absolute Path or an error message.
+    Writes are limited to .md files inside the vault, outside hidden folders and
+    the folders the indexer skips (templates, attachments)."""
+    raw = path.strip()
+    if not raw:
+        return "Empty path."
+    target = Path(raw) if Path(raw).is_absolute() else VAULT_ROOT / raw
+    if target.suffix != ".md":
+        target = target.with_name(target.name + ".md")
+    try:
+        parts = target.resolve().relative_to(VAULT_ROOT).parts
+    except ValueError:
+        return f"Refusing to write outside the vault: {path}"
+    if any(part.startswith(".") for part in parts):
+        return f"Refusing to write to hidden files or folders: {path}"
+    if len(parts) > 1 and parts[0] in vi.SKIP_TOP_LEVEL:
+        return f"Refusing to write in '{parts[0]}': {path}"
+    if must_exist and not target.is_file():
+        return f"Note not found: {path} (write tools need an exact path)"
+    return target
+
+
+def after_write() -> None:
+    """Make the change searchable immediately rather than within a minute."""
+    global _last_refresh
+    _last_refresh = 0.0
+    ensure_index()
+
+
+def rel(path: Path) -> str:
+    return path.resolve().relative_to(VAULT_ROOT).as_posix()
+
+
+if WRITABLE:
+    @vault_tool("Create a new note in {label}.")
+    def create_note(path: str, content: str) -> str:
+        """
+        Create a new Markdown note. Fails if the note already exists; it never
+        overwrites. Missing folders are created.
+
+        Args:
+            path:    Vault-relative path, e.g. 'Journal/2026-10-20.md' ('.md' is
+                     added if left off).
+            content: Full text of the note, including any frontmatter.
+        """
+        target = write_target(path, must_exist=False)
+        if isinstance(target, str):
+            return target
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with open(target, "x", encoding="utf-8", newline="") as f:
+                f.write(content)
+        except FileExistsError:
+            return f"Note already exists: {rel(target)}. Use append_to_note or edit_note."
+        except OSError as e:
+            return f"Error creating {path}: {e}"
+        after_write()
+        return f"Created {rel(target)} ({len(content.encode('utf-8')):,} bytes)."
+
+    @vault_tool("Append text to an existing note in {label}.")
+    def append_to_note(path: str, content: str) -> str:
+        """
+        Add text to the end of an existing note. A newline is inserted first if
+        the note doesn't end with one. Nothing already in the note changes.
+
+        Args:
+            path:    Exact vault-relative path of an existing note.
+            content: Text to add.
+        """
+        target = write_target(path, must_exist=True)
+        if isinstance(target, str):
+            return target
+        try:
+            existing = target.read_bytes()
+            lead = "" if not existing or existing.endswith(b"\n") else "\n"
+            with open(target, "a", encoding="utf-8", newline="") as f:
+                f.write(lead + content)
+        except OSError as e:
+            return f"Error appending to {path}: {e}"
+        after_write()
+        return f"Appended {len(content.encode('utf-8')):,} bytes to {rel(target)}."
+
+    @vault_tool("Replace one passage of a note in {label}.")
+    def edit_note(path: str, old_text: str, new_text: str) -> str:
+        """
+        Replace an exact passage in an existing note. old_text must appear
+        exactly once, so the edit fails rather than guess if the note has
+        changed since you read it. Include enough surrounding text to be unique.
+
+        Args:
+            path:     Exact vault-relative path of an existing note.
+            old_text: The exact text to replace (whitespace matters).
+            new_text: Its replacement (empty string deletes the passage).
+        """
+        target = write_target(path, must_exist=True)
+        if isinstance(target, str):
+            return target
+        if not old_text:
+            return "old_text is empty; use append_to_note to add text."
+        try:
+            text = target.read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            return f"Error reading {path}: {e}"
+        count = text.count(old_text)
+        if count != 1:
+            return (f"old_text was not found in {rel(target)}; read the note again." if count == 0
+                    else f"old_text appears {count} times in {rel(target)}; include more context.")
+        tmp = target.with_name(f".vault-mcp-{os.getpid()}.tmp")
+        try:
+            tmp.write_bytes(text.replace(old_text, new_text, 1).encode("utf-8"))
+            shutil.copymode(target, tmp)
+            os.replace(tmp, target)
+        except OSError as e:
+            tmp.unlink(missing_ok=True)
+            return f"Error editing {path}: {e}"
+        after_write()
+        return f"Edited {rel(target)}."
+
+    @vault_tool("Move or rename a note in {label}.")
+    def move_note(path: str, new_path: str) -> str:
+        """
+        Move or rename a note. Fails if the destination already exists. Links
+        in other notes are NOT updated.
+
+        Args:
+            path:     Exact vault-relative path of an existing note.
+            new_path: Vault-relative destination path.
+        """
+        src = write_target(path, must_exist=True)
+        if isinstance(src, str):
+            return src
+        dest = write_target(new_path, must_exist=False)
+        if isinstance(dest, str):
+            return dest
+        if dest.exists():
+            return f"Destination already exists: {rel(dest)}"
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            os.rename(src, dest)
+        except OSError as e:
+            return f"Error moving {path}: {e}"
+        after_write()
+        return f"Moved {rel(src)} to {rel(dest)}."
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 

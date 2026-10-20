@@ -2,9 +2,12 @@
 # Vault MCP server setup: run once per vault per machine (macOS or Linux), and
 # again any time a server stops connecting. Safe to re-run.
 #
-#   bash setup.sh <name> <vault path>
+#   bash setup.sh <name> <vault path> [--writable]
 #   bash setup.sh work     ~/repos/notes-unisys
-#   bash setup.sh personal ~/repos/notes-personal
+#   bash setup.sh personal ~/repos/notes-personal --writable
+#
+# Vaults are read-only unless --writable is given. Re-run without it to turn
+# writing back off.
 #
 # 1. Creates ONE shared Python virtualenv (~/.local/share/vault-mcp/venv) and
 #    installs 'mcp<2' into it.
@@ -24,7 +27,9 @@ PY="$VENV/bin/python"
 step() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 fail() { printf '\033[31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
-[ $# -eq 2 ] || fail "usage: bash setup.sh <name> <vault path>
+WRITABLE=""
+if [ $# -eq 3 ] && [ "$3" = "--writable" ]; then WRITABLE="--writable"; set -- "$1" "$2"; fi
+[ $# -eq 2 ] || fail "usage: bash setup.sh <name> <vault path> [--writable]
        e.g. bash setup.sh work ~/repos/notes-unisys"
 NAME="$1"
 case "$NAME" in
@@ -33,6 +38,7 @@ esac
 [ -d "$2" ] || fail "not a directory: $2"
 VAULT="$(cd "$2" && pwd)"
 ENTRY="vault-$NAME"
+MODE="read-only"; [ -n "$WRITABLE" ] && MODE="read-write"
 
 # ── 1. Python environment ─────────────────────────────────────────────────────
 
@@ -79,10 +85,10 @@ step "Building search index for $NAME"
 # ── 3. Handshake test ─────────────────────────────────────────────────────────
 
 step "Testing the server"
-"$PY" - "$PY" "$SERVER" "$VAULT" "$NAME" <<'EOF'
+"$PY" - "$PY" "$SERVER" "$VAULT" "$NAME" $WRITABLE <<'EOF'
 import json, subprocess, sys
-py, server, vault, name = sys.argv[1:5]
-proc = subprocess.Popen([py, server, "--vault", vault, "--name", name],
+py, server, vault, name, *extra = sys.argv[1:]
+proc = subprocess.Popen([py, server, "--vault", vault, "--name", name, *extra],
                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE, text=True)
 msgs = [
@@ -114,14 +120,14 @@ EOF
 
 # ── 4. Register with Claude ───────────────────────────────────────────────────
 
-step "Registering $ENTRY with Claude Code"
+step "Registering $ENTRY with Claude Code ($MODE)"
 if command -v claude >/dev/null 2>&1; then
   claude mcp remove "$ENTRY" --scope user >/dev/null 2>&1 || true
-  claude mcp add "$ENTRY" --scope user -- "$PY" "$SERVER" --vault "$VAULT" --name "$NAME"
+  claude mcp add "$ENTRY" --scope user -- "$PY" "$SERVER" --vault "$VAULT" --name "$NAME" $WRITABLE
 else
   echo "The 'claude' CLI is not on PATH, so Claude Code was NOT registered."
   echo "Install it, then re-run this script, or register by hand:"
-  echo "  claude mcp add $ENTRY --scope user -- \"$PY\" \"$SERVER\" --vault \"$VAULT\" --name \"$NAME\""
+  echo "  claude mcp add $ENTRY --scope user -- \"$PY\" \"$SERVER\" --vault \"$VAULT\" --name \"$NAME\" $WRITABLE"
 fi
 
 step "Registering $ENTRY with Claude Desktop"
@@ -130,16 +136,16 @@ case "$(uname)" in
   *)      DESKTOP_CONFIG="$HOME/.config/Claude/claude_desktop_config.json" ;;
 esac
 if [ -d "$(dirname "$DESKTOP_CONFIG")" ]; then
-  "$PY" - "$DESKTOP_CONFIG" "$ENTRY" "$PY" "$SERVER" "$VAULT" "$NAME" <<'EOF'
+  "$PY" - "$DESKTOP_CONFIG" "$ENTRY" "$PY" "$SERVER" "$VAULT" "$NAME" $WRITABLE <<'EOF'
 import json, shutil, sys
 from pathlib import Path
-config_path, entry, py, server, vault, name = Path(sys.argv[1]), *sys.argv[2:7]
+config_path, entry, py, server, vault, name, *extra = Path(sys.argv[1]), *sys.argv[2:]
 config = {}
 if config_path.exists():
     shutil.copy(config_path, config_path.with_suffix(".json.bak"))
     config = json.loads(config_path.read_text() or "{}")
 servers = config.setdefault("mcpServers", {})
-servers[entry] = {"command": py, "args": [server, "--vault", vault, "--name", name]}
+servers[entry] = {"command": py, "args": [server, "--vault", vault, "--name", name, *extra]}
 config_path.write_text(json.dumps(config, indent=2) + "\n")
 print(f"Wrote '{entry}' to {config_path} (backup: .json.bak)")
 others = [n for n in servers if n != entry]
